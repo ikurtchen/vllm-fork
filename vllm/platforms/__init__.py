@@ -28,28 +28,29 @@ def tpu_platform_plugin() -> Optional[str]:
 
 
 def cuda_platform_plugin() -> Optional[str]:
-    is_cuda = False
+    #is_cuda = False
 
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        try:
-            if pynvml.nvmlDeviceGetCount() > 0:
-                is_cuda = True
-        finally:
-            pynvml.nvmlShutdown()
-    except Exception:
-        # CUDA is supported on Jetson, but NVML may not be.
-        import os
+    #try:
+    #    import pynvml
+    #    pynvml.nvmlInit()
+    #    try:
+    #        if pynvml.nvmlDeviceGetCount() > 0:
+    #            is_cuda = True
+    #    finally:
+    #        pynvml.nvmlShutdown()
+    #except Exception:
+    #    # CUDA is supported on Jetson, but NVML may not be.
+    #    import os
 
-        def cuda_is_jetson() -> bool:
-            return os.path.isfile("/etc/nv_tegra_release") \
-                or os.path.exists("/sys/class/tegra-firmware")
+    #    def cuda_is_jetson() -> bool:
+    #        return os.path.isfile("/etc/nv_tegra_release") \
+    #            or os.path.exists("/sys/class/tegra-firmware")
 
-        if cuda_is_jetson():
-            is_cuda = True
+    #    if cuda_is_jetson():
+    #        is_cuda = True
 
-    return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
+    #return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
+    return None
 
 
 def rocm_platform_plugin() -> Optional[str]:
