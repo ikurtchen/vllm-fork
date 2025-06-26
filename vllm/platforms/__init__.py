@@ -48,6 +48,9 @@ def tpu_platform_plugin() -> Optional[str]:
 
 
 def cuda_platform_plugin() -> Optional[str]:
+    if not hasattr(torch._C, "_cuda_getDeviceCount"):
+        return None
+
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:
