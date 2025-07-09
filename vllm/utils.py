@@ -1169,7 +1169,9 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
     prev_set_stream(stream)
 
 
-torch.cuda.set_stream = _patched_set_stream
+# TODO check why migration tool cannot handle this
+if not (int(os.getenv("PT_HPU_GPU_MIGRATION", "0")) == 1 and int(os.getenv("PT_HPU_LAZY_MODE", "0")) != 0):
+    torch.cuda.set_stream = _patched_set_stream
 
 
 def current_stream() -> torch.cuda.Stream:
