@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from dataclasses import dataclass, asdict, is_dataclass, fields
+from typing import Any, Callable, Optional
 
 import numpy as np
 import prometheus_client
@@ -42,6 +44,105 @@ class StatLoggerBase(ABC):
     def log(self):  # noqa
         pass
 
+class DumpLoggingStatLogger(StatLoggerBase):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        #print(f"Enter DumpLoggingStatLogger __init__")
+        self.engine_index = engine_index
+        self.vllm_config = vllm_config
+
+        self.scheduler_stats_list = {engine_index : []}
+        self.iteration_stats_list = {engine_index : []}
+
+        self.counter = 0
+
+    def record(self,
+               scheduler_stats: Optional[SchedulerStats],
+               iteration_stats: Optional[IterationStats],
+               engine_idx: int = 0):
+        #print(f"Enter DumpLoggingStatLogger record, {scheduler_stats=}, {iteration_stats=}, {engine_idx=}")
+        if scheduler_stats is not None:
+            self.scheduler_stats_list[engine_idx].append(scheduler_stats)
+
+        if iteration_stats is not None:
+            self.iteration_stats_list[engine_idx].append(iteration_stats)
+
+    def get_stat_dict(self, obj: Any) -> dict:
+        if obj is None:
+            return None
+
+        # Handle built-in types
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+
+        # Handle lists or tuples
+        if isinstance(obj, list) or isinstance(obj, tuple):
+            return [self.get_stat_dict(item) for item in obj]
+
+        # Handle dictionaries
+        if isinstance(obj, dict):
+            return {key: self.get_stat_dict(value) for key, value in obj.items()}
+
+        # Handle dataclasses
+        if is_dataclass(obj):
+            result = {'__class__': obj.__class__.__name__}
+            for field in fields(obj):
+                value = getattr(obj, field.name)
+                result[field.name] = self.get_stat_dict(value)
+            return result
+
+        # Handle regular classes
+        if hasattr(obj, '__dict__'):
+            result = {'__class__': obj.__class__.__name__}
+            for key, value in obj.__dict__.items():
+                # Skip private attributes unless necessary
+                if not key.startswith('__'):
+                    result[key] = self.get_stat_dict(value)
+            return result
+
+        # Fallback for other types
+        return obj
+
+    def log(self):
+        #print(f"Enter DumpLoggingStatLogger log, {len(self.scheduler_stats_list)=}, {len(self.iteration_stats_list)=}, {self.counter=}")
+        for engine_index, scheduler_stats in \
+                self.scheduler_stats_list.items():
+            if not scheduler_stats:
+                continue
+
+            filename = f"vllm_dump_scheduler_stats_e{engine_index}_{self.counter}.json"
+            logger.info(
+                "Engine %03d: Dumping SchedulerStats to file: %s",
+                engine_index, filename)
+
+            scheduler_stats_data = self.get_stat_dict(scheduler_stats)
+            with open(filename, "w") as f:
+                json.dump(scheduler_stats_data, f, indent=2)
+        self.scheduler_stats_list.clear()
+
+        for engine_index, iteration_stats in \
+                self.iteration_stats_list.items():
+            if not iteration_stats:
+                continue
+
+            filename = f"vllm_dump_iteration_stats_e{engine_index}_{self.counter}.json"
+            logger.info(
+                "Engine %03d: Dumping IterationStats to file: %s",
+                engine_index, filename)
+
+            iteration_stats_data = self.get_stat_dict(iteration_stats)
+            with open(filename, "w") as f:
+                json.dump(iteration_stats_data, f, indent=2)
+        self.iteration_stats_list.clear()
+
+        self.counter += 1
+
+
+    def log_engine_initialized(self):
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "Engine %03d: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
 
 class LoggingStatLogger(StatLoggerBase):
 

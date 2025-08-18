@@ -1442,6 +1442,9 @@ class LLM:
                         else:
                             pbar.update(1)
 
+        if self.llm_engine.stat_logger is not None:
+            self.llm_engine.stat_logger.log()
+
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.
