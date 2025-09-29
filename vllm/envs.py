@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_ON_DEMAND_TORCH_PROFILER: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -127,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
+    VLLM_WORKERS_NUMA_TOPO: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -578,6 +580,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
 
+    # Enables on-demand torch profiler, value should be the config file path.
+    "VLLM_ON_DEMAND_TORCH_PROFILER":
+    lambda: os.getenv("VLLM_ON_DEMAND_TORCH_PROFILER", None),
+
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
     lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
@@ -878,6 +884,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Gloo on CPU and avoid hangs (send/recv/broadcast).
     "VLLM_PP_USE_CPU_COMS":
     lambda: bool(int(os.getenv("VLLM_PP_USE_CPU_COMS", "0"))),
+
+    # Device NUMA topo, format: "module_id_start,module_id_stop:cpu_affinity:numa_affinity;
+    # module_id_start,module_id_stop:cpu_affinity:numa_affinity".
+    "VLLM_WORKERS_NUMA_TOPO":
+    lambda: os.getenv("VLLM_WORKERS_NUMA_TOPO", None),
 }
 
 # --8<-- [end:env-vars-definition]
