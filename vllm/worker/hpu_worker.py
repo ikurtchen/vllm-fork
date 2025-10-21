@@ -28,8 +28,8 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (bind_kv_cache, hpu_backend_string, hpu_device_string,
-                        is_fake_hpu)
+from vllm.utils import (GiB_bytes, bind_kv_cache, hpu_backend_string,
+                        hpu_device_string, is_fake_hpu)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_enc_dec_model_runner import HPUEncoderDecoderModelRunner
 from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
@@ -123,6 +123,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+
+        # State for sleep/wakeup functionality
+        self._model_on_cpu = False
 
     def full_trace_handler(self, dir_name, use_gzip=False):
 
@@ -519,6 +522,95 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         return HPUCacheEngine.get_cache_block_size(self.cache_config,
                                                    self.model_config,
                                                    self.parallel_config)
+
+    def sleep(self, level: int = 1) -> None:
+        """Put the worker into sleep mode to reduce memory usage.
+
+        Unlike GPU workers that use custom memory allocators, HPU workers
+        use a simpler approach of moving model to CPU and clearing KV cache.
+
+        Args:
+            level (int): Sleep level (kept for interface compatibility,
+                        always performs level 1 operations)
+        """
+        if self._model_on_cpu:
+            logger.warning("Worker is already in sleep mode")
+            return
+
+        free_bytes_before_sleep, total_bytes = torch.hpu.mem_get_info()
+        logger.warning(
+            "Entering sleep mode: free bytes before sleep: %.2f GiB, "
+            "total bytes: %.2f GiB", free_bytes_before_sleep / GiB_bytes,
+            total_bytes / GiB_bytes)
+        # Move model to CPU (if model is loaded)
+        if hasattr(self.model_runner,
+                   'model') and self.model_runner.model is not None:
+            logger.info("Moving model to CPU for sleep mode")
+            self.model_runner.model.to("cpu")
+        else:
+            logger.info("Model not loaded yet, skipping model move to CPU")
+
+        # Clear KV cache
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            del self.cache_engine[ve].gpu_cache
+            del self.cache_engine[ve].cpu_cache
+        self.cache_engine.clear()
+        self.hpu_cache.clear()
+        self.hpu_cache = None
+        for layer_name in self.compilation_config.static_forward_context:
+            self.compilation_config.static_forward_context[
+                layer_name].kv_cache.clear()
+            self.compilation_config.static_forward_context[
+                layer_name].kv_cache = [
+                    torch.tensor([])
+                    for _ in range(self.parallel_config.pipeline_parallel_size)
+                ]
+
+        free_bytes_after_sleep, _ = torch.hpu.mem_get_info()
+        logger.warning(
+            "Free bytes after sleep: %.2f GiB, total bytes: %.2f GiB",
+            free_bytes_after_sleep / GiB_bytes, total_bytes / GiB_bytes)
+
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total_bytes - free_bytes_after_sleep
+
+        self._model_on_cpu = True
+
+        logger.warning(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        """Wake up the worker from sleep mode.
+
+        Moves the model back to HPU and optionally reinitializes KV cache.
+
+        Args:
+            tags: Optional list of tags (kept for interface compatibility)
+        """
+        if tags is None:
+            tags = ["weights", "kv_cache"]
+        if "weights" in tags:
+            if not self._model_on_cpu:
+                logger.warning("Worker is not in sleep mode")
+                return
+
+            logger.info("Waking up worker: moving model back to HPU")
+
+            # Move model back to HPU (if model is loaded)
+            if hasattr(self.model_runner,
+                       'model') and self.model_runner.model is not None:
+                self.model_runner.model.to(self.device)
+            else:
+                logger.info("Model not loaded yet, skipping model move to HPU")
+            self._model_on_cpu = False
+
+        if "kv_cache" in tags:
+            # If KV cache was cleared, it will need to be reinitialized
+            # by the engine when needed
+            self._init_cache_engine()
+            logger.info("Worker wake up completed")
 
 
 def init_worker_distributed_environment(
