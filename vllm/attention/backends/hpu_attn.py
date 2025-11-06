@@ -6,6 +6,7 @@
 ###############################################################################
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -28,6 +29,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+log_counter = 0
+max_log_count = -1
+
+_PAD_BLOCK_ID = 0
 
 class HPUAttentionBackend(AttentionBackend):
 
@@ -456,6 +461,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             self.sliding_window_right = int(
                 os.environ.get('VLLM_FUSEDSDPA_SLIDE_RIGHT', '0'))
 
+        self.layer_name = None
+        self.layer_number = -1
+
     def _maybe_init_alibi_biases(
         self,
         max_seq_len,
@@ -491,6 +499,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             slot_mapping = attn_metadata.slot_mapping.flatten(
             ) if attn_metadata.slot_mapping is not None else None
             batch_size = attn_metadata.num_prefills
+        global log_counter
+        global max_log_count
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"preprocess_forward: {is_prefill=}, {seq_len=}, {batch_size=}, slot_mapping: {slot_mapping.shape if slot_mapping is not None else None}, {query.shape=}, {key.shape=}, {value.shape=}")
         # Convert Flat inputs into 2D Inputs
         hidden_size = query.shape[-1]
         query = query.reshape(batch_size, seq_len, hidden_size)
@@ -501,6 +513,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         hidden_size = value.shape[-1]
         value = value.reshape(batch_size, seq_len, hidden_size)
 
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"preprocess_forward: after reshape: {query.shape=}, {key.shape=}, {value.shape=}")
         # Insert key and value to kv cache
         attn_data.batch_size, attn_data.seq_len, attn_data.hidden_size\
               = query.shape
@@ -508,10 +522,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"preprocess_forward: after view: {query.shape=}, {key.shape=}, {value.shape=}")
 
         if kv_cache is not None:
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"preprocess_forward: {key_cache.shape=}, {value_cache.shape=}")
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
@@ -523,9 +541,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             attn_data.value_cache = self.v_cache(value,
                                                  value_cache,
                                                  slot_mapping)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"preprocess_forward: after index copy, {attn_data.key_cache.shape=}, {attn_data.value_cache.shape=}")
+
         attn_data.key = key
         attn_data.value = value
         attn_data.query = query
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"preprocess_forward: {attn_data.query.shape=}, {attn_data.key.shape=}, {attn_data.value.shape=}")
         return attn_data
 
     def forward_chunked_prefill(
@@ -562,6 +585,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         decode_batch_size = 0
         decode_seq_len = 0
         decode_hidden_size = 0
+        global log_counter
+        global max_log_count
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"forward_chunked_prefill: {attn_metadata.num_prefills=}, {attn_metadata.num_decode_tokens=}")
         if attn_metadata.num_prefills > 0:
             attn_data = self.preprocess_forward(
                 query[:attn_metadata.num_prefill_tokens],
@@ -576,6 +603,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                            self.head_size)
             kv_shape = (prefill_batch_size, attn_data.seq_len_kv,
                         self.num_kv_heads, self.head_size)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill (prefill): {query_shape=}, {kv_shape=}")
+
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill (prefill): {attn_metadata=}")
+                if attn_metadata is not None:
+                    print(f"forward_chunked_prefill (prefill): attn_metadata.block_list: {attn_metadata.block_list.shape if attn_metadata.block_list is not None else None}, {attn_metadata.block_list=}")
 
             if attn_metadata is None or attn_metadata.block_list is None:
 
@@ -587,6 +621,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                                             attn_metadata.block_size)
                 attn_bias = attn_metadata.attn_bias
                 position_bias = None
+                if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                    print(f"forward_chunked_prefill (prefill): attn_bias: {attn_bias.shape if attn_bias is not None else None}, {position_bias=}")
 
                 out = ops.prompt_attention(
                 impl=self.prefill_impl,
@@ -602,32 +638,67 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 # TODO: enable FusedSDPA
                 block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
+                block_list_size_per_batch = len(attn_metadata.block_list) // attn_metadata.num_prefills
 
-                common_args = self.common_attention_args(block_list, attn_data.key_cache,
+                attn_bias = attn_metadata.attn_bias
+
+                out = None
+                for i in range(attn_metadata.num_prefills):
+                    block_list_chunk = block_list[i * block_list_size_per_batch:
+                                                (i + 1) * block_list_size_per_batch]
+                    if block_list_chunk[0] == _PAD_BLOCK_ID: # casual
+                        block_list_chunk = None
+                        attn_bias_chunk = None
+                        is_causal = True
+                    else:
+                        attn_bias_chunk = attn_bias
+                        is_causal = False
+
+                    common_args = self.common_attention_args(block_list_chunk, attn_data.key_cache,
                                                             attn_data.value_cache,
                                                             attn_metadata.block_size)
-                attn_bias = attn_metadata.attn_bias
-                position_bias = None
+                    position_bias = None
+                    if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                        print(f"forward_chunked_prefill (prefill): [{i}] attn_bias: {attn_bias.shape if attn_bias is not None else None}, {position_bias=}")
 
-                out = ops.prompt_attention(
-                impl=self.prefill_impl,
-                query=attn_data.query.view(query_shape),
+                    if is_causal:
+                        out_chunk = ops.prompt_attention(
+                        impl=self.prefill_impl,
+                        query=attn_data.query.view(query_shape)[i].unsqueeze(0),
+                        key=attn_data.key.view(kv_shape)[i].unsqueeze(0),
+                        value=attn_data.value.view(kv_shape)[i].unsqueeze(0),
+                        is_causal=is_causal,
+                        position_bias=position_bias,
+                        valid_seq_lengths=attn_metadata.seq_lens_tensor[i],
+                        **common_args)
+                    else:
+                        out_chunk = ops.prompt_attention(
+                        impl=self.prefill_impl,
+                        query=attn_data.query.view(query_shape)[i].unsqueeze(0),
+                        key=attn_data.key.view(kv_shape)[i].unsqueeze(0),
+                        value=attn_data.value.view(kv_shape)[i].unsqueeze(0),
+                        is_causal=is_causal,
+                        attn_bias=attn_bias_chunk,
+                        position_bias=position_bias,
+                        **common_args)
 
-                key=self.k_cache.fetch_from_cache(
-                        attn_data.key_cache.unflatten(0, (-1, attn_metadata.block_size)),
-                        attn_metadata.block_list).view(kv_shape),
-                value=self.v_cache.fetch_from_cache(
-                        attn_data.value_cache.unflatten(0, (-1, attn_metadata.block_size)),
-                        attn_metadata.block_list).view(kv_shape),
-                is_causal=False,
-                attn_bias=attn_bias,
-                position_bias=position_bias,
-                **common_args)
+                    if out is None:
+                        out = out_chunk
+                    else:
+                        out = torch.cat((out, out_chunk), dim=0)
 
+                #key=self.k_cache.fetch_from_cache(
+                #        attn_data.key_cache.unflatten(0, (-1, attn_metadata.block_size)),
+                #        attn_metadata.block_list).view(kv_shape),
+                #value=self.v_cache.fetch_from_cache(
+                #        attn_data.value_cache.unflatten(0, (-1, attn_metadata.block_size)),
+                #        attn_metadata.block_list).view(kv_shape),
             prompt_output = out.reshape(prefill_batch_size, prefill_seq_len,
                                         prefill_hidden_size)
         htorch.core.mark_step()
         if attn_metadata.num_decode_tokens > 0:
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill (decode)")
             # Decoding run.
             attn_data = self.preprocess_forward(
                 query[attn_metadata.num_prefill_tokens:],
@@ -651,8 +722,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if decode_output is None:
             prompt_output = prompt_output.view(
                 prefill_batch_size , prefill_seq_len, prefill_hidden_size)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill: {prompt_output.shape=}")
             return prompt_output
         elif prompt_output is None:
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill: {decode_output.shape=}")
             return decode_output.view(decode_batch_size * decode_seq_len,
                                       decode_hidden_size)
         else:
@@ -661,6 +736,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             decode_output = decode_output.view(
                 decode_batch_size * decode_seq_len, decode_hidden_size)
             output = torch.cat((prompt_output, decode_output))
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"forward_chunked_prefill: {prompt_output.shape=}, {decode_output.shape=}, {output.shape=}")
             htorch.core.mark_step()
             return output
     def forward(
@@ -684,6 +761,15 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        global log_counter
+        global max_log_count
+        if torch.distributed.get_rank() == 0:
+            if self.layer_number < 0 and self.layer_name is not None:
+                m = re.search(r"\.(\d+)\.", self.layer_name)
+                if m:
+                    self.layer_number = int(m.group(1))
+                else:
+                    print(f"Failed to find layer number in {self.layer_name=}")
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if attn_metadata.chunk_prefill_enabled:
             return self.forward_chunked_prefill(
@@ -709,21 +795,30 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"HPUAttentionImpl.forward: {query.shape=}, {key.shape=}, {value.shape=}")
+
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         slot_mapping = attn_metadata.slot_mapping.flatten(
         ) if attn_metadata.slot_mapping is not None else None
+        if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+            print(f"HPUAttentionImpl.forward: slot_mapping: {slot_mapping.shape if slot_mapping is not None else None}, {key.shape=}, {value.shape=}")
         key_cache = None
         value_cache = None
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"HPUAttentionImpl.forward: {key_cache.shape=}, {value_cache.shape=}")
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
             key_cache = self.k_cache(key, key_cache, slot_mapping)
             value_cache = self.v_cache(value, value_cache, slot_mapping)
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"HPUAttentionImpl.forward: after index copy, {key_cache.shape=}, {value_cache.shape=}, {key.shape=}, {value.shape=}")
 
         if attn_metadata.is_prompt:
             # Prompt run.
@@ -759,6 +854,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
+
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                if block_list is not None:
+                    print(f"HPUAttentionImpl.forward: {block_list.shape=}, {block_list=}")
+                else:
+                    print(f"HPUAttentionImpl.forward: {block_list=}")
 
             common_args = self.common_attention_args(block_list, key_cache,
                                                      value_cache,
@@ -816,6 +917,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_mapping = attn_metadata.block_mapping
                 attn_bias = attn_metadata.attn_bias
 
+            if torch.distributed.get_rank() == 0 and self.layer_number == 0 and (max_log_count < 0 or log_counter < max_log_count):
+                print(f"HPUAttentionImpl.forward: {block_list.shape=}, {block_groups.shape=}, {block_mapping.shape=}, attn_bias:{attn_bias.shape if attn_bias is not None else None}")
+
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
             if self.alibi_slopes is not None and alibi_blocks is not None:
@@ -860,6 +964,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'key_cache': key_cache,
             'value_cache': value_cache,
             'block_size': block_size,
+            'layer_number': self.layer_number
         }
 
     def forward_encoder_decoder(

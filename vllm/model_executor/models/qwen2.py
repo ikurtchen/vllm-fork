@@ -27,6 +27,7 @@
 import os
 from collections.abc import Iterable
 from typing import Any, Optional, Union
+import re
 
 import torch
 from torch import nn
@@ -256,12 +257,24 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+        self.log_counter = 0
+        m = re.search(r"\.(\d+)$", prefix)
+        if m:
+            self.layer_number = int(m.group(1))
+        else:
+            self.layer_number = -1
+            print(f"Failed to find layer number in {prefix=}")
+        print(f"{self.layer_number=}")
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} enter: {hidden_states.shape=}, {positions.shape=}")
+
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -269,15 +282,24 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after input norm: {hidden_states.shape=}, {positions.shape=}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after attn: {hidden_states.shape=}, {positions.shape=}")
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after mlp: {hidden_states.shape=}, {positions.shape=}")
+
+        self.log_counter += 1
+
         return hidden_states, residual
 
 
