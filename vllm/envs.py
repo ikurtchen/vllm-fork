@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_WORKERS_NUMA_TOPO: Optional[str] = None
+    VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT: bool = False
 
 
 def get_default_cache_root():
@@ -899,6 +900,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_TARGET_DECODE_SIZE concentrate low concurrency requests on single VE.
     "VLLM_TARGET_DECODE_SIZE":
     lambda: int(os.getenv("VLLM_TARGET_DECODE_SIZE", "0")),
+
+    # Use chunked prefill with dynamic input shapes for HPU backend.
+    "VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT":
+    lambda: bool(int(os.getenv("VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
