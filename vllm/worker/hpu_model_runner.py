@@ -2054,8 +2054,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # prefix caching or chunked prefill
 
             max_num_block = max(len(bt) for bt in prefix_block_tables)
-            max_num_block = self.bucketing_manager.find_prompt_bucket(
-                bs, target_query_len, max_num_block)[2]
+            #max_num_block = self.bucketing_manager.find_prompt_bucket(
+            #    bs, target_query_len, max_num_block)[2]
             prefix_block_list = list(
                 itertools.chain.from_iterable(
                     bt if len(bt) == max_num_block else bt +
@@ -3322,10 +3322,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.vllm_config.compilation_config.static_forward_context,
             [kv_caches] * (self.parallel_config.pipeline_parallel_size + envs.VLLM_PP_BONUS_VE))
         max_seq_len = self.bucketing_manager.get_max_prompt_shape()
-        if self.scheduler_config.chunked_prefill_enabled:
-            max_seq_len = min(max_seq_len,
-                              self.max_num_batched_tokens,
-                              self.max_seq_len_to_capture)
+        #if self.scheduler_config.chunked_prefill_enabled:
+        #    max_seq_len = min(max_seq_len,
+        #                      self.max_num_batched_tokens,
+        #                      self.max_seq_len_to_capture)
         max_batch_size = min(self.max_num_seqs,
                              self.max_num_batched_tokens // max_seq_len)
 
