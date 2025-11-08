@@ -241,15 +241,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
 
-        if execute_model_req is not None and not execute_model_req.is_first_multi_step and not execute_model_req.is_last_step:
-            if execute_model_req is not None:
-                ids = [list(seq.seq_data.keys()) for seq in execute_model_req.seq_group_metadata_list]
-                prompts = [seq.is_prompt for seq in execute_model_req.seq_group_metadata_list]
-                logger.info(f"mp_executor._driver_execute_model_async done 1 for VE{execute_model_req.virtual_engine} with IDs={ids} and prompts={prompts}")
-            else:
-                logger.info(f"mp_executor._driver_execute_model_async done 1 with None")
-            return [None]
-
         if current_platform.is_hpu():
             original_execute_model_req = execute_model_req
             execute_model_req = self.prepare_execute_model_req_patch(
