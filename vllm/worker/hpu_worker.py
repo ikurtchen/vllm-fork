@@ -544,10 +544,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 self._remove_chunk_padding(execute_model_req)
             self.cached_execute_model_req[
                 execute_model_req.virtual_engine] = execute_model_req
-        if execute_model_req is not None and get_tp_group().is_first_rank:
-            ids = [list(seq.seq_data.keys()) for seq in execute_model_req.seq_group_metadata_list]
-            prompts = [seq.is_prompt for seq in execute_model_req.seq_group_metadata_list]
-            logger.info(f"hpu_worker[{get_world_group().rank_in_group}].execute_model end for VE{execute_model_req.virtual_engine} with IDs={ids} and prompts={prompts}")
         return output
 
     def _execute_model(
@@ -557,31 +553,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         with self.lock:
-            if execute_model_req is not None and get_tp_group().is_first_rank:
-                def get_chunk_context_and_len(seq, chunk_size: int) -> tuple[int, int]:
-                    total_prompt_len = len(seq._prompt_token_ids)
-                    cached_len = seq._num_cached_tokens        # already cached
-                    context_len = seq._num_computed_tokens            # already run
-                    remaining = total_prompt_len - context_len - cached_len        # not yet computed
-                    current_chunk_len = max(0, min(chunk_size, remaining))
-                    return cached_len, context_len, current_chunk_len
-                ids = [list(seq.seq_data.keys()) for seq in execute_model_req.seq_group_metadata_list]
-                prompts = [seq.is_prompt for seq in execute_model_req.seq_group_metadata_list]
-                cached = []
-                contexts = []
-                sequences = []
-                chunks = []
-                for seq_group in execute_model_req.seq_group_metadata_list:
-                    cached += [[]]
-                    contexts += [[]]
-                    sequences += [[]]
-                    chunks += [seq_group.token_chunk_size]
-                    for seq in seq_group.seq_data.values():
-                        cache, context, sequence = get_chunk_context_and_len(seq, seq_group.token_chunk_size)
-                        cached[-1].append(cache)
-                        contexts[-1].append(context)
-                        sequences[-1].append(sequence)
-                logger.info(f"hpu_worker[{get_world_group().rank_in_group}].execute_model start for VE{execute_model_req.virtual_engine} with IDs={ids} and prompts={prompts}, cached={cached}, contexts={contexts}, sequences={sequences}, chunk_size={chunks}") 
             inputs = self.prepare_input(execute_model_req)
             if inputs is None:
                 return None

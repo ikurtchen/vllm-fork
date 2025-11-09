@@ -261,30 +261,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             )
 
         # Only the last PP stage has the final results.
-        if original_execute_model_req is not None:
-            def get_chunk_context_and_len(seq, chunk_size: int) -> tuple[int, int]:
-                total_prompt_len = len(seq._prompt_token_ids)
-                cached_len = seq._num_cached_tokens        # already cached
-                context_len = seq._num_computed_tokens            # already run
-                remaining = total_prompt_len - context_len - cached_len        # not yet computed
-                current_chunk_len = max(0, min(chunk_size, remaining))
-                return cached_len, context_len, current_chunk_len
-            ids = [list(seq.seq_data.keys()) for seq in original_execute_model_req.seq_group_metadata_list]
-            prompts = [seq.is_prompt for seq in original_execute_model_req.seq_group_metadata_list]
-            cached = []
-            contexts = []
-            sequences = []
-            for seq_group in original_execute_model_req.seq_group_metadata_list:
-                cached += [[]]
-                contexts += [[]]
-                sequences += [[]]
-                for seq in seq_group.seq_data.values():
-                    cache, context, sequence = get_chunk_context_and_len(seq, seq_group.token_chunk_size)
-                    cached[-1].append(cache)
-                    contexts[-1].append(context)
-                    sequences[-1].append(sequence)
-            logger.info(f"mp_executor._driver_execute_model_async done for VE{original_execute_model_req.virtual_engine} with IDs={ids} and prompts={prompts}, cached={cached}, contexts={contexts}, sequences={sequences}") 
-            logger.info(f"mp_executor._driver_execute_model_async done for VE{original_execute_model_req.virtual_engine} with IDs={ids} result={results[-1]}")
         return results[-1]
 
     async def _start_worker_execution_loop(self):

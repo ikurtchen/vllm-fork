@@ -1571,26 +1571,14 @@ class Scheduler:
         prefill_running_existing = any(sg.is_prefill() for sg in self.running)
         prefill_swapped_existing = any(sg.is_prefill() for sg in self.swapped)
         prefill_only_mode = prefill_waiting or prefill_running_existing or prefill_swapped_existing
-        if self.scheduler_config.max_num_prefill_seqs is not None:
-            logger.info(f"Scheduler._schedule_chunked_prefill.prefill_only_mode_check "
-                        f"prefill_waiting={prefill_waiting} prefill_running_existing={prefill_running_existing} "
-                        f"prefill_swapped_existing={prefill_swapped_existing} prefill_only_mode_initial={prefill_only_mode} "
-                        f"running_decodes={sum(1 for sg in self.running if not sg.is_prefill())} "
-                        f"max_num_seqs={self.scheduler_config.max_num_seqs} max_num_prefill_seqs={self.scheduler_config.max_num_prefill_seqs}")
         # Skip prefill-only path entirely if we already have max_num_seqs worth of decoding.
         if prefill_only_mode:
             decoding_running = [sg for sg in self.running if not sg.is_prefill()]
             if (self.scheduler_config.max_num_seqs is not None
                 and len(decoding_running) >= self.scheduler_config.max_num_seqs):
                 prefill_only_mode = False
-                if self.scheduler_config.max_num_prefill_seqs is not None:
-                    logger.info(f"Scheduler._schedule_chunked_prefill.prefill_only_mode_disabled_due_to_decode_capacity "
-                                f"decoding_running={len(decoding_running)} max_num_seqs={self.scheduler_config.max_num_seqs}")
         if prefill_only_mode and self.scheduler_config.max_num_prefill_seqs is not None:
             # Temporarily restrict running/swapped queues to prefills (+ limited decodes).
-            logger.info(f"Scheduler._schedule_chunked_prefill.enter_prefill_only_mode "
-                        f"waiting_size={len(self.waiting)} running_size={len(self.running)} swapped_size={len(self.swapped)} "
-                        f"token_budget={self.scheduler_config.max_num_batched_tokens}")
             original_running = self.running
             original_swapped = self.swapped
             # Allow some decode groups to remain to fill up to max_num_seqs.
@@ -1599,18 +1587,13 @@ class Scheduler:
                 (self.scheduler_config.max_num_seqs or 0)
                 - (self.scheduler_config.max_num_prefill_seqs or 0),
             )
-            logger.info(f"Scheduler._schedule_chunked_prefill.allowed_decode_capacity "
-                        f"allowed_decode_capacity={allowed_decode_capacity}")
             prefill_running_subset = [sg for sg in original_running if sg.is_prefill()]
             decode_running_subset = [
                 sg for sg in original_running if not sg.is_prefill()
             ][:allowed_decode_capacity]
             self.running = deque(prefill_running_subset + decode_running_subset)
             self.swapped = deque([sg for sg in original_swapped if sg.is_prefill()])
-            logger.info(f"Scheduler._schedule_chunked_prefill.restricted_queues "
-                        f"prefill_running_subset={len(prefill_running_subset)} "
-                        f"decode_running_subset={len(decode_running_subset)} "
-                        f"swapped_prefill_subset={len(self.swapped)}")
+
             # Partial prefill metadata only over prefills.
             partial_prefill_metadata = PartialPrefillMetadata.from_queues(
                 running=self.running,
@@ -1623,19 +1606,11 @@ class Scheduler:
                 enable_chunking=True,
                 partial_prefill_metadata=partial_prefill_metadata,
             )
-            if self.scheduler_config.max_num_prefill_seqs is not None:
-                logger.info(f"Scheduler._schedule_chunked_prefill.after_schedule_running "
-                            f"prefill_groups={len(running_scheduled.prefill_seq_groups)} "
-                            f"decode_groups={len(running_scheduled.decode_seq_groups)} "
-                            f"preempted={len(running_scheduled.preempted)} swapped_out={len(running_scheduled.swapped_out)} "
-                            f"budget_batched_tokens={budget.num_batched_tokens} budget_cached_tokens={budget.num_cached_tokens} "
-                            f"budget_curr_seqs={budget.num_curr_seqs}")
             if len(running_scheduled.preempted) + len(running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras, enable_chunking=True)
-                if self.scheduler_config.max_num_prefill_seqs is not None:
-                    logger.info(f"Scheduler._schedule_chunked_prefill.after_schedule_swapped "
-                                f"swapped_in_prefill={len(swapped_in.prefill_seq_groups)} swapped_in_decode={len(swapped_in.decode_seq_groups)} "
-                                f"blocks_to_swap_in={len(swapped_in.blocks_to_swap_in)} blocks_to_copy={len(swapped_in.blocks_to_copy)}")
+                # Drop any decode groups just in case (should be none in prefill-only filtering).
+                swapped_in.decode_seq_groups = []
+
             # Enforce microbatch sequence cap = max_num_prefill_seqs (continuing + new only).
             cfg_limit = self.scheduler_config.max_num_prefill_seqs
             continuing_seq_count = (
@@ -1643,10 +1618,6 @@ class Scheduler:
                 + sum(s.seq_group.get_max_num_running_seqs() for s in swapped_in.prefill_seq_groups)
             )
             remaining_capacity = cfg_limit - continuing_seq_count
-            logger.info(f"Scheduler._schedule_chunked_prefill.capacity_calc "
-                        f"continuing_prefill_seq_count={continuing_seq_count} cfg_limit={cfg_limit} "
-                        f"remaining_capacity_for_new_prefills={remaining_capacity} "
-                        f"budget_remaining_tokens={budget.remaining_token_budget()}")
             if remaining_capacity > 0:
                 prefills = self._schedule_prefills(
                     budget,
@@ -1656,6 +1627,7 @@ class Scheduler:
                     max_new_prefills=remaining_capacity,
                 )
 
+
             scheduled_seq_groups = (
                 running_scheduled.prefill_seq_groups
                 + swapped_in.prefill_seq_groups
@@ -1663,12 +1635,6 @@ class Scheduler:
                 + running_scheduled.decode_seq_groups
                 + swapped_in.decode_seq_groups
             )
-            if self.scheduler_config.max_num_prefill_seqs is not None:
-                logger.info(f"Scheduler._schedule_chunked_prefill.final_batch_assembly "
-                            f"scheduled_prefill={len(running_scheduled.prefill_seq_groups) + len(swapped_in.prefill_seq_groups) + len(prefills.seq_groups)} "
-                            f"scheduled_decode={len(running_scheduled.decode_seq_groups) + len(swapped_in.decode_seq_groups)} "
-                            f"total_scheduled={len(scheduled_seq_groups)} "
-                            f"num_batched_tokens={budget.num_batched_tokens} num_cached_tokens={budget.num_cached_tokens}")
             num_prefill_groups = (
                 len(running_scheduled.prefill_seq_groups)
                 + len(swapped_in.prefill_seq_groups)
@@ -1712,7 +1678,6 @@ class Scheduler:
                 preempted=preempted,
             )
         # -------- End prefill-only microbatch path --------
-
  
         # Create partial prefill metadata
         partial_prefill_metadata = PartialPrefillMetadata.from_queues(
@@ -1928,11 +1893,6 @@ class Scheduler:
                 assert len(seqs) == 1
                 num_computed_tokens = seqs[0].data.get_num_computed_tokens()
                 is_first_prefill = num_computed_tokens == 0
-                if self.scheduler_config.chunked_prefill_enabled and self.scheduler_config.max_num_prefill_seqs is not None:
-                    logger.info(f"Scheduler.schedule.prefill_metadata_build "
-                                f"request_id={seq_group.request_id} seq_id={seqs[0].seq_id} "
-                                f"token_chunk_size={token_chunk_size} num_computed_tokens_before={num_computed_tokens} "
-                                f"total_len={seqs[0].data.get_len()} is_first_prefill={is_first_prefill}")
                 # In the next iteration, all prompt tokens are not computed.
                 # It means the prefill is chunked, and we don't need sampling.
                 # NOTE: We use get_len instead of get_prompt_len because when
@@ -1941,16 +1901,7 @@ class Scheduler:
                 if (token_chunk_size + num_computed_tokens
                         < seqs[0].data.get_len()):
                     do_sample = False
-                    if self.scheduler_config.chunked_prefill_enabled and self.scheduler_config.max_num_prefill_seqs is not None:
-                        logger.info(f"Scheduler.schedule.prefill_sampling_disabled "
-                                    f"request_id={seq_group.request_id} seq_id={seqs[0].seq_id} "
-                                    f"token_chunk_size={token_chunk_size} num_computed_tokens_before={num_computed_tokens} "
-                                    f"remaining={seqs[0].data.get_len() - (token_chunk_size + num_computed_tokens)}")
-                else:
-                    if self.scheduler_config.chunked_prefill_enabled and self.scheduler_config.max_num_prefill_seqs is not None:
-                        logger.info(f"Scheduler.schedule.prefill_sampling_enabled_last_chunk "
-                                    f"request_id={seq_group.request_id} seq_id={seqs[0].seq_id} "
-                                    f"token_chunk_size={token_chunk_size} num_computed_tokens_before={num_computed_tokens}")
+
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
@@ -2369,18 +2320,7 @@ class Scheduler:
                 self.partial_prefill_budget_lookup_list,
                 partial_prefill_metadata,
             )
-        if (self.scheduler_config.chunked_prefill_enabled
-                and enable_chunking
-                and self.scheduler_config.max_num_prefill_seqs is not None
-                and any(seq.is_prefill() for seq in seqs)):
-            for seq in seqs:
-                if seq.is_prefill():
-                    logger.info(f"Scheduler._get_num_new_uncached_and_cached_tokens.prefill_decision "
-                                f"seq_id={seq.seq_id} status={status.name} "
-                                f"computed_tokens={seq.get_num_computed_tokens()} total_len={seq.get_len()} "
-                                f"uncached_new_tokens_total={num_uncached_new_tokens} cached_new_tokens_total={num_cached_new_tokens} "
-                                f"enable_chunking={enable_chunking} remaining_token_budget={budget.remaining_token_budget()} "
-                                f"is_multi_step={self.scheduler_config.is_multi_step}")
+
         return num_uncached_new_tokens, num_cached_new_tokens
 
     @staticmethod
@@ -2407,7 +2347,6 @@ class Scheduler:
         Returns:
             The number of new tokens to schedule after chunking.
         """
-        bonus_tokens_budget = scheduler_config.max_num_seqs - scheduler_config.max_num_prefill_seqs
         remaining_token_budget = budget.remaining_token_budget()
         if scheduler_config.is_multi_step:
             # The current multi-step + chunked prefill capability does
@@ -2451,7 +2390,5 @@ class Scheduler:
 
         num_new_tokens = min(num_new_tokens, remaining_token_budget,
                              prefill_slot_budget)
-        logger.info(f"Scheduler._chunk_new_tokens_to_schedule.result "
-                    f"num_new_tokens_chunked={num_new_tokens} remaining_token_budget={remaining_token_budget} "
-                    f"prefill_slot_budget={prefill_slot_budget} prompt_limit={prompt_limit}")
+
         return num_new_tokens
