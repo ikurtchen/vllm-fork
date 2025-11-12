@@ -666,7 +666,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 prefill_batch_size , prefill_seq_len, prefill_hidden_size)
             return prompt_output
         elif prompt_output is None:
-            return decode_output.view(decode_batch_size * decode_seq_len,
+            return decode_output.view(decode_batch_size, decode_seq_len,
                                       decode_hidden_size)
         else:
             prompt_output = prompt_output.view(
