@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_WORKERS_NUMA_TOPO: Optional[str] = None
     VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT: bool = False
+    VLLM_ON_DEMAND_TORCH_PROFILER: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -904,6 +905,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use chunked prefill with dynamic input shapes for HPU backend.
     "VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT":
     lambda: bool(int(os.getenv("VLLM_HPU_CHUNKED_PREFILL_DYNAMIC_INPUT", "0"))),
+
+    # Enables on-demand torch profiler, value should be the config file path.
+    "VLLM_ON_DEMAND_TORCH_PROFILER":
+    lambda: os.getenv("VLLM_ON_DEMAND_TORCH_PROFILER", None),
 }
 
 # --8<-- [end:env-vars-definition]

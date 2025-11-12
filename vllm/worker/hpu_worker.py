@@ -12,6 +12,7 @@ import gzip
 import json
 import os
 import queue
+import signal
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
@@ -118,16 +119,36 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 with_stack = False
             else:
                 fn = torch.profiler.tensorboard_trace_handler
-                with_stack = True
-            self.profiler = torch.profiler.profile(
-                activities=[
+                if envs.VLLM_ON_DEMAND_TORCH_PROFILER:
+                    with_stack = False
+                else:
+                    with_stack = True
+
+            if envs.VLLM_ON_DEMAND_TORCH_PROFILER:
+                prof_activities=[
+                    torch.profiler.ProfilerActivity.HPU,
+                ]
+            else:
+                prof_activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.HPU,
-                ],
+                ]
+            self.profiler = torch.profiler.profile(
+                activities=prof_activities,
                 with_stack=with_stack,
                 on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+
+        self.on_demand_profiler_mode = None
+        if envs.VLLM_ON_DEMAND_TORCH_PROFILER:
+            self.on_demand_profiler_step_start = 0
+            self.on_demand_profiler_step_stop = 1
+            self.on_demand_profiler_state = None # started, running, stopped
+            self.on_demand_profiler_step_counter = 0
+
+            self.update_on_demand_profiler_cfg()
+            self.setup_signal_handler()
 
         self.all_cached_seq_data: Dict[int, dict] = {}
         self.cached_execute_model_req: Dict[int, ExecuteModelRequest] = {}
@@ -135,6 +156,53 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         self.lock = threading.Lock()
         self._master_cache_lock = threading.Lock()
         self._cache_lock: Dict[int, threading.Lock] = {}
+
+    def update_on_demand_profiler_cfg(self):
+        assert self.on_demand_profiler_state is None and self.on_demand_profiler_step_counter==0, \
+                "on_demand_profiler not in reset state when update config"
+
+        # read config from the file set with VLLM_ON_DEMAND_TORCH_PROFILER
+        on_demand_profiler_cfg = None
+        if os.path.isfile(envs.VLLM_ON_DEMAND_TORCH_PROFILER):
+            with open(envs.VLLM_ON_DEMAND_TORCH_PROFILER, 'r') as f:
+                on_demand_profiler_cfg = f.read().strip() # mode,step_start,step_stop
+        else:
+            logger.warning(f"VLLM_ON_DEMAND_TORCH_PROFILER file {envs.VLLM_ON_DEMAND_TORCH_PROFILER} not found, skipping")
+
+        if on_demand_profiler_cfg is not None:
+            on_demand_profiler_cfg_list = [option.strip() for option in on_demand_profiler_cfg.split(',')]
+            if len(on_demand_profiler_cfg_list) > 0:
+                self.on_demand_profiler_mode = on_demand_profiler_cfg_list[0]
+            if len(on_demand_profiler_cfg_list) > 1:
+                self.on_demand_profiler_step_start = int(on_demand_profiler_cfg_list[1])
+            if len(on_demand_profiler_cfg_list) > 2:
+                self.on_demand_profiler_step_stop = int(on_demand_profiler_cfg_list[2])
+
+            self.on_demand_profiler_state = None # started, running, stopped
+            self.on_demand_profiler_step_counter = 0
+
+            logger.info(f"on_demand_profiler config: ({self.on_demand_profiler_mode}, {self.on_demand_profiler_step_start},"
+                         f" {self.on_demand_profiler_step_stop}),"
+                         f" {self.on_demand_profiler_state=}, {self.on_demand_profiler_step_counter=}")
+        else:
+            logger.warning(f"Invalid on_demand_profiler config in {envs.VLLM_ON_DEMAND_TORCH_PROFILER}, skipping")
+
+    def setup_signal_handler(self):
+        def handle_sigusr1(signum, frame):
+            logger.info("Received SIGUSR1 - start profile...")
+            self.start_profile()
+
+        def handle_sigusr2(signum, frame):
+            logger.info(f"Received SIGUSR2 - update profile config from {envs.VLLM_ON_DEMAND_TORCH_PROFILER}...")
+            self.update_on_demand_profiler_cfg()
+
+        signal.signal(signal.SIGUSR1, handle_sigusr1)
+        signal.signal(signal.SIGUSR2, handle_sigusr2)
+
+        pid = os.getpid()
+        logger.info(f"Signal handler for SIGUSR1 and SIGUSR2 is set up:\n"
+                       f"  kill -SIGUSR1 {pid}  # start profile\n"
+                       f"  kill -SIGUSR2 {pid}  # update config from {envs.VLLM_ON_DEMAND_TORCH_PROFILER}")
 
     def full_trace_handler(self, dir_name, use_gzip=False):
 
@@ -189,6 +257,21 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def start_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
+
+        if self.on_demand_profiler_mode is not None:
+            assert self.on_demand_profiler_state is None, \
+                "on_demand_profiler is already started"
+
+            self.on_demand_profiler_state = "started"
+            self.on_demand_profiler_step_counter = 0
+            return
+
+        self.do_start_profile()
+
+    def do_start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+
         high_level_profiler = self.model_runner.profiler
         with high_level_profiler.record_event('internal', 'start_profiler'):
             # Clean up the queue
@@ -202,7 +285,32 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def stop_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
+
+        if self.on_demand_profiler_mode is not None:
+            if self.on_demand_profiler_state is None:
+                logger.warning("on_demand_profiler state is none, skip stopping")
+            else:
+                assert self.on_demand_profiler_state == "started" or \
+                    self.on_demand_profiler_state == "running", \
+                    "on_demand_profiler is not started"
+
+                self.on_demand_profiler_state = "stopped"
+                self.on_demand_profiler_step_counter = 0
+            return
+
+        self.do_stop_profile()
+
+    def do_stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+
         self.profiler.stop()
+
+    def do_step_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+
+        self.profiler.step()
 
     def _set_env_vars(self):
         local_rank = self.local_rank
@@ -559,6 +667,15 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
             model_input, worker_input, kwargs = inputs
 
+            if self.on_demand_profiler_mode is not None:
+                if self.on_demand_profiler_state == "started":
+                    if self.on_demand_profiler_mode == "p" and model_input.attn_metadata.is_prompt or \
+                            self.on_demand_profiler_mode == "d" and not model_input.attn_metadata.is_prompt:
+                        if self.on_demand_profiler_step_counter == self.on_demand_profiler_step_start:
+                            self.do_start_profile()
+                            self.on_demand_profiler_state = "running"
+                        self.on_demand_profiler_step_counter += 1
+
             num_steps = worker_input.num_steps
             if (execute_model_req is not None
                     and execute_model_req.spec_step_idx):
@@ -589,6 +706,20 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 assert isinstance(output, IntermediateTensors)
                 get_pp_group().send_tensor_dict(
                     output.tensors, all_gather_group=get_tp_group())
+
+                if self.on_demand_profiler_mode is not None:
+                    if self.on_demand_profiler_state == "running":
+                        self.do_step_profile()
+
+                        if self.on_demand_profiler_step_counter >= self.on_demand_profiler_step_stop:
+                            self.on_demand_profiler_state = "stopped"
+                        else:
+                            self.on_demand_profiler_step_counter += 1
+
+                    if self.on_demand_profiler_state == "stopped":
+                        self.do_stop_profile()
+                        self.on_demand_profiler_state = None
+                        self.on_demand_profiler_step_counter = 0
                 return [None]
 
         #if get_pp_group().is_last_rank and get_pp_group().world_size > 1:
@@ -612,6 +743,19 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         #        ]
         #    else:
         #        output = [None]
+
+        if self.on_demand_profiler_mode is not None:
+            if self.on_demand_profiler_state == "running":
+                #self.do_step_profile()
+
+                if self.on_demand_profiler_step_counter >= self.on_demand_profiler_step_stop:
+                    self.on_demand_profiler_state = "stopped"
+                self.on_demand_profiler_step_counter += 1
+
+            if self.on_demand_profiler_state == "stopped":
+                self.do_stop_profile()
+                self.on_demand_profiler_state = None
+                self.on_demand_profiler_step_counter = 0
 
         # output is List[SamplerOutput]
         return output
