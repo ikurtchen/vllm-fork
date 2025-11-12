@@ -146,6 +146,8 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
                              kv_sharing_target_layer_name, **extra_impl_args)
+        if hasattr(self.impl, "layer_name"):
+            setattr(self.impl, "layer_name", prefix)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 

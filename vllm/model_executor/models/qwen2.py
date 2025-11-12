@@ -27,6 +27,7 @@
 import os
 from collections.abc import Iterable
 from typing import Any, Optional, Union
+import re
 
 import torch
 from torch import nn
@@ -193,8 +194,16 @@ class Qwen2Attention(nn.Module):
             valid_len = attn_metadata.seq_lens_tensor
             mask = get_input_mask(hidden_states, valid_len)
             hidden_states = hidden_states * mask.unsqueeze(-1)
+        #if torch.distributed.get_rank() == 0:
+        #    print(f"Qwen2Attention forward: {hidden_states.shape=}, {hidden_states.stride()=}, {positions.shape=}, {positions.stride()=}")
         qkv, _ = self.qkv_proj(hidden_states)
+        #if torch.distributed.get_rank() == 0:
+        #    print(f"Qwen2Attention forward: {qkv.shape=}, {qkv.stride()=}")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        #if torch.distributed.get_rank() == 0:
+        #    print(f"Qwen2Attention forward: {q.shape=}, {q.stride()=}")
+        #    print(f"Qwen2Attention forward: {k.shape=}, {k.stride()=}")
+        #    print(f"Qwen2Attention forward: {v.shape=}, {v.stride()=}")
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         if (is_hpu and self.enable_zero_padding
@@ -256,12 +265,24 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+        self.log_counter = 0
+        m = re.search(r"\.(\d+)$", prefix)
+        if m:
+            self.layer_number = int(m.group(1))
+        else:
+            self.layer_number = -1
+            print(f"Failed to find layer number in {prefix=}")
+        print(f"{self.layer_number=}")
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} enter: {hidden_states.shape=}, {positions.shape=}")
+
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -269,15 +290,24 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after input norm: {hidden_states.shape=}, {positions.shape=}")
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after attn: {hidden_states.shape=}, {positions.shape=}")
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        if torch.distributed.get_rank() == 0 and self.log_counter < 50 and self.layer_number == 0:
+            print(f"Qwen2DecoderLayer forward {self.log_counter} after mlp: {hidden_states.shape=}, {positions.shape=}")
+
+        self.log_counter += 1
+
         return hidden_states, residual
 
 
